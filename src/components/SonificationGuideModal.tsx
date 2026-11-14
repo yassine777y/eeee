@@ -112,15 +112,17 @@ export function SonificationGuideModal({ open, onClose }: SonificationGuideModal
 
           <section>
             <h3 className="font-display text-base font-semibold text-slate-100">
-              03. Accessibility &amp; Keyboard Controls
+              03. AI Climate Voice Guide &amp; Accessibility
             </h3>
             <p className="mt-1.5 text-xs text-slate-400">
-              Enable Voice Narrator for spoken summaries whenever you switch layers, scrub decades,
-              or click a point on the 3D Earth.
+              Click any country or ocean on the 3D Earth to hear the AI Climate Scientist explain
+              the exact location, year, and reading in English, French, or Arabic. Use the Mute
+              Agent button at the top-right (or press A) to silence the voice guide independently
+              from the Earth soundscape.
             </p>
             <div className="mt-3 grid grid-cols-2 sm:grid-cols-3 gap-2.5 text-xs">
               <div className="flex items-center justify-between rounded border border-slate-800 px-3 py-2">
-                <span className="text-slate-400">Play / Pause</span>
+                <span className="text-slate-400">Play / Pause Audio</span>
                 <kbd className="font-mono text-slate-100">Space</kbd>
               </div>
               <div className="flex items-center justify-between rounded border border-slate-800 px-3 py-2">
@@ -132,8 +134,8 @@ export function SonificationGuideModal({ open, onClose }: SonificationGuideModal
                 <kbd className="font-mono text-slate-100">M</kbd>
               </div>
               <div className="flex items-center justify-between rounded border border-slate-800 px-3 py-2">
-                <span className="text-slate-400">Voice Narrator</span>
-                <kbd className="font-mono text-slate-100">V</kbd>
+                <span className="text-slate-400">Mute / Unmute Agent</span>
+                <kbd className="font-mono text-slate-100">A</kbd>
               </div>
               <div className="flex items-center justify-between rounded border border-slate-800 px-3 py-2">
                 <span className="text-slate-400">Scrub Year</span>

@@ -32,6 +32,7 @@ export class EarthSonificationEngine {
 
   // State
   private isPlaying = false;
+  private isDucked = false;
   private mode: AudioMode = 'ambient';
   private volume = 0.65;
   private layerId: ClimateLayerId = 'temperature';
@@ -159,6 +160,17 @@ export class EarthSonificationEngine {
     this.noiseSource.start();
   }
 
+  private getEffectiveGain(): number {
+    return this.volume * 0.85 * (this.isDucked ? 0.35 : 1.0);
+  }
+
+  public setAgentDucking(ducking: boolean): void {
+    this.isDucked = ducking;
+    if (this.ctx && this.masterGain && this.isPlaying) {
+      this.masterGain.gain.setTargetAtTime(this.getEffectiveGain(), this.ctx.currentTime, 0.14);
+    }
+  }
+
   public async setPlaying(playing: boolean): Promise<void> {
     this.isPlaying = playing;
     if (playing) {
@@ -169,7 +181,7 @@ export class EarthSonificationEngine {
       if (this.masterGain) {
         const now = ctx.currentTime;
         this.masterGain.gain.cancelScheduledValues(now);
-        this.masterGain.gain.setTargetAtTime(this.volume * 0.85, now, 0.25);
+        this.masterGain.gain.setTargetAtTime(this.getEffectiveGain(), now, 0.25);
       }
       this.applyModeMix();
     } else if (this.ctx && this.masterGain) {
@@ -182,7 +194,7 @@ export class EarthSonificationEngine {
   public setVolume(vol: number): void {
     this.volume = Math.max(0, Math.min(1, vol));
     if (this.ctx && this.masterGain && this.isPlaying) {
-      this.masterGain.gain.setTargetAtTime(this.volume * 0.85, this.ctx.currentTime, 0.08);
+      this.masterGain.gain.setTargetAtTime(this.getEffectiveGain(), this.ctx.currentTime, 0.08);
     }
   }
 
@@ -388,17 +400,34 @@ export class EarthSonificationEngine {
   }
 }
 
-export function speakNarration(text: string, enabled: boolean): void {
-  if (!enabled || typeof window === 'undefined' || !('speechSynthesis' in window)) return;
+const SPEECH_LOCALE: Record<'en' | 'fr' | 'ar', string> = {
+  en: 'en-US',
+  fr: 'fr-FR',
+  ar: 'ar-SA',
+};
+
+export function speakNarration(
+  text: string,
+  enabled: boolean,
+  lang: 'en' | 'fr' | 'ar' = 'en',
+  onEnd?: () => void
+): void {
+  if (!enabled || typeof window === 'undefined' || !('speechSynthesis' in window)) {
+    onEnd?.();
+    return;
+  }
   try {
     window.speechSynthesis.cancel();
     const utterance = new SpeechSynthesisUtterance(text);
-    utterance.rate = 0.96;
+    utterance.lang = SPEECH_LOCALE[lang];
+    utterance.rate = 0.98;
     utterance.pitch = 1.0;
-    utterance.volume = 0.85;
+    utterance.volume = 0.9;
+    utterance.onend = () => onEnd?.();
+    utterance.onerror = () => onEnd?.();
     window.speechSynthesis.speak(utterance);
   } catch {
-    // Graceful no-op if speech synthesis is restricted
+    onEnd?.();
   }
 }
 

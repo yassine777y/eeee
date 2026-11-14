@@ -13,10 +13,13 @@ import {
   ProbedLocation,
 } from './data/climateLayers';
 import {
+  AgentAudioPlayer,
+  AgentLanguage,
+  requestLocationExplanation,
+} from './engine/agentVoiceClient';
+import {
   EarthSonificationEngine,
   MeridianTelemetry,
-  speakNarration,
-  stopNarration,
 } from './engine/sonificationEngine';
 
 export default function App() {
@@ -26,7 +29,10 @@ export default function App() {
   const [isPlayingAudio, setIsPlayingAudio] = useState<boolean>(false);
   const [audioMode, setAudioMode] = useState<AudioMode>('ambient');
   const [volume, setVolume] = useState<number>(0.65);
-  const [voiceNarratorEnabled, setVoiceNarratorEnabled] = useState<boolean>(false);
+  const [agentMuted, setAgentMuted] = useState<boolean>(false);
+  const [agentLanguage, setAgentLanguage] = useState<AgentLanguage>('en');
+  const [agentStatus, setAgentStatus] = useState<'idle' | 'thinking' | 'speaking'>('idle');
+  const [agentCaption, setAgentCaption] = useState<string>('');
   const [autoRotate, setAutoRotate] = useState<boolean>(false);
   const [zenMode, setZenMode] = useState<boolean>(false);
   const [guideOpen, setGuideOpen] = useState<boolean>(false);
@@ -36,18 +42,103 @@ export default function App() {
   const [liveAnnouncement, setLiveAnnouncement] = useState<string>('');
 
   const engine = useMemo(() => new EarthSonificationEngine(), []);
+  const agentPlayer = useMemo(() => new AgentAudioPlayer(), []);
+
   const yearRef = useRef(year);
   yearRef.current = year;
 
-  // Clean up audio & speech on unmount
+  const activeLayerRef = useRef(activeLayer);
+  activeLayerRef.current = activeLayer;
+
+  const agentMutedRef = useRef(agentMuted);
+  agentMutedRef.current = agentMuted;
+
+  const agentLanguageRef = useRef(agentLanguage);
+  agentLanguageRef.current = agentLanguage;
+
+  const probeSeqRef = useRef(0);
+  const probeAbortRef = useRef<AbortController | null>(null);
+
+  const stopAgentActivity = useCallback(() => {
+    probeAbortRef.current?.abort();
+    probeAbortRef.current = null;
+    agentPlayer.stop();
+    engine.setAgentDucking(false);
+    setAgentStatus('idle');
+  }, [agentPlayer, engine]);
+
+  // Clean up audio, agent speech & requests on unmount
   useEffect(() => {
     return () => {
-      stopNarration();
+      probeAbortRef.current?.abort();
+      agentPlayer.stop();
       engine.dispose();
     };
-  }, [engine]);
+  }, [agentPlayer, engine]);
 
-  // Sync audio engine state
+  // Core explain + speak runner for a probed globe location
+  const runAgentForLocation = useCallback(
+    async (probe: ProbedLocation, layerId: ClimateLayerId, targetYear: number, lang: AgentLanguage) => {
+      probeAbortRef.current?.abort();
+      agentPlayer.stop();
+      engine.setAgentDucking(false);
+
+      const controller = new AbortController();
+      probeAbortRef.current = controller;
+      const seq = ++probeSeqRef.current;
+
+      setAgentStatus('thinking');
+      setAgentCaption('');
+
+      try {
+        const explanation = await requestLocationExplanation(
+          {
+            placeName: probe.regionName,
+            lat: probe.lat,
+            lon: probe.lon,
+            layerId,
+            year: targetYear,
+            formattedValue: probe.formattedValue,
+            language: lang,
+          },
+          controller.signal
+        );
+
+        if (controller.signal.aborted || seq !== probeSeqRef.current) return;
+
+        setAgentCaption(explanation);
+        setLiveAnnouncement(explanation);
+
+        if (agentMutedRef.current) {
+          setAgentStatus('idle');
+          return;
+        }
+
+        await agentPlayer.speak(explanation, lang, controller.signal, {
+          onAudioStart: () => {
+            if (seq !== probeSeqRef.current || agentMutedRef.current) return;
+            engine.setAgentDucking(true);
+            setAgentStatus('speaking');
+          },
+          onAudioEnd: () => {
+            engine.setAgentDucking(false);
+            if (seq === probeSeqRef.current) {
+              setAgentStatus('idle');
+            }
+          },
+        });
+      } catch (err) {
+        if (err instanceof DOMException && err.name === 'AbortError') return;
+        engine.setAgentDucking(false);
+        if (seq === probeSeqRef.current) {
+          setAgentStatus('idle');
+        }
+      }
+    },
+    [agentPlayer, engine]
+  );
+
+  // Sync Earth music play/pause
   const handleToggleAudio = useCallback(() => {
     setIsPlayingAudio((prev) => {
       const next = !prev;
@@ -69,9 +160,8 @@ export default function App() {
           ? 'Switched to Ambient Musical soundscape.'
           : 'Switched to Live Pixel Scan data synthesizer.';
       setLiveAnnouncement(msg);
-      speakNarration(msg, voiceNarratorEnabled);
     },
-    [engine, voiceNarratorEnabled]
+    [engine]
   );
 
   const handleChangeVolume = useCallback(
@@ -86,54 +176,103 @@ export default function App() {
     (layerId: ClimateLayerId) => {
       setActiveLayer(layerId);
       setProbedLocation(null);
+      setAgentCaption('');
+      stopAgentActivity();
       engine.setLayer(layerId);
 
       const spec = CLIMATE_LAYERS[layerId];
       const metric = spec.globalMetricAtYear(yearRef.current);
       const summary = `${spec.title}, ${yearRef.current}: global average ${metric.formatted}. ${spec.description}`;
       setLiveAnnouncement(summary);
-      speakNarration(summary, voiceNarratorEnabled);
     },
-    [engine, voiceNarratorEnabled]
+    [engine, stopAgentActivity]
   );
 
   const handleChangeYear = useCallback(
     (nextYear: number) => {
       const clamped = Math.max(MIN_YEAR, Math.min(MAX_YEAR, nextYear));
       setYear(clamped);
-      const spec = CLIMATE_LAYERS[activeLayer];
+      const spec = CLIMATE_LAYERS[activeLayerRef.current];
       const metric = spec.globalMetricAtYear(clamped);
       setLiveAnnouncement(`${spec.title} in ${clamped}: ${metric.formatted}`);
     },
-    [activeLayer]
+    []
   );
 
-  const handleToggleVoiceNarrator = useCallback(() => {
-    setVoiceNarratorEnabled((prev) => {
+  // Dedicated independent Agent Mute toggle (top bar + shortcut A)
+  const handleToggleAgentMute = useCallback(() => {
+    setAgentMuted((prev) => {
       const next = !prev;
+      agentMutedRef.current = next;
       if (next) {
-        const spec = CLIMATE_LAYERS[activeLayer];
-        const metric = spec.globalMetricAtYear(yearRef.current);
-        speakNarration(
-          `Voice narrator enabled. Viewing ${spec.title} in ${yearRef.current}, global average ${metric.formatted}.`,
-          true
-        );
+        stopAgentActivity();
+        setLiveAnnouncement('AI Voice Agent muted. Earth music remains unaffected.');
       } else {
-        stopNarration();
+        setLiveAnnouncement('AI Voice Agent unmuted.');
       }
       return next;
     });
-  }, [activeLayer]);
+  }, [stopAgentActivity]);
+
+  // Switchable EN / FR / AR language selector
+  const handleChangeAgentLanguage = useCallback(
+    (lang: AgentLanguage) => {
+      setAgentLanguage(lang);
+      agentLanguageRef.current = lang;
+      if (probedLocation) {
+        void runAgentForLocation(
+          probedLocation,
+          activeLayerRef.current,
+          yearRef.current,
+          lang
+        );
+      }
+    },
+    [probedLocation, runAgentForLocation]
+  );
+
+  // Replay current explanation speech
+  const handleReplayAgent = useCallback(() => {
+    if (!agentCaption || agentMutedRef.current) return;
+    probeAbortRef.current?.abort();
+    const controller = new AbortController();
+    probeAbortRef.current = controller;
+    const seq = ++probeSeqRef.current;
+
+    void agentPlayer.speak(agentCaption, agentLanguageRef.current, controller.signal, {
+      onAudioStart: () => {
+        if (seq !== probeSeqRef.current || agentMutedRef.current) return;
+        engine.setAgentDucking(true);
+        setAgentStatus('speaking');
+      },
+      onAudioEnd: () => {
+        engine.setAgentDucking(false);
+        if (seq === probeSeqRef.current) {
+          setAgentStatus('idle');
+        }
+      },
+    });
+  }, [agentCaption, agentPlayer, engine]);
 
   const handleProbeLocation = useCallback(
     (probe: ProbedLocation) => {
       setProbedLocation(probe);
       void engine.playProbeChime(probe.normalizedValue, probe.lat);
-      setLiveAnnouncement(probe.narrative);
-      speakNarration(probe.narrative, voiceNarratorEnabled);
+      void runAgentForLocation(
+        probe,
+        activeLayerRef.current,
+        yearRef.current,
+        agentLanguageRef.current
+      );
     },
-    [engine, voiceNarratorEnabled]
+    [engine, runAgentForLocation]
   );
+
+  const handleClearProbe = useCallback(() => {
+    setProbedLocation(null);
+    setAgentCaption('');
+    stopAgentActivity();
+  }, [stopAgentActivity]);
 
   const handleScanUpdate = useCallback(
     (lonDeg: number, telemetry: MeridianTelemetry) => {
@@ -187,8 +326,8 @@ export default function App() {
         handleSelectLayer(CLIMATE_LAYER_ORDER[3]);
       } else if (e.key === 'm' || e.key === 'M') {
         handleChangeAudioMode(audioMode === 'ambient' ? 'pixelScan' : 'ambient');
-      } else if (e.key === 'v' || e.key === 'V') {
-        handleToggleVoiceNarrator();
+      } else if (e.key === 'a' || e.key === 'A') {
+        handleToggleAgentMute();
       } else if (e.key === 'h' || e.key === 'H') {
         setZenMode((prev) => !prev);
       } else if (e.key === 't' || e.key === 'T') {
@@ -210,7 +349,7 @@ export default function App() {
     handleToggleAudio,
     handleSelectLayer,
     handleChangeAudioMode,
-    handleToggleVoiceNarrator,
+    handleToggleAgentMute,
     handleToggleTimelapse,
     handleChangeYear,
   ]);
@@ -222,11 +361,13 @@ export default function App() {
         {liveAnnouncement}
       </div>
 
-      {/* Top Observatory Navigation */}
+      {/* Top Observatory Navigation with Always-Reachable Mute Agent Control */}
       <ObservatoryHeader
         activeLayer={activeLayer}
         onSelectLayer={handleSelectLayer}
-        onOpenGuide={() => setGuideOpen(true)}
+        agentMuted={agentMuted}
+        agentStatus={agentStatus}
+        onToggleAgentMute={handleToggleAgentMute}
         zenMode={zenMode}
       />
 
@@ -258,14 +399,19 @@ export default function App() {
         onChangeAudioMode={handleChangeAudioMode}
         volume={volume}
         onChangeVolume={handleChangeVolume}
-        voiceNarratorEnabled={voiceNarratorEnabled}
-        onToggleVoiceNarrator={handleToggleVoiceNarrator}
+        agentLanguage={agentLanguage}
+        onChangeAgentLanguage={handleChangeAgentLanguage}
+        agentMuted={agentMuted}
+        agentStatus={agentStatus}
+        agentCaption={agentCaption}
+        onReplayAgent={handleReplayAgent}
+        onOpenGuide={() => setGuideOpen(true)}
         autoRotate={autoRotate}
         onToggleAutoRotate={() => setAutoRotate((r) => !r)}
         onResetCamera={() => setCameraResetTrigger((c) => c + 1)}
         scanLonDeg={scanLonDeg}
         probedLocation={probedLocation}
-        onClearProbe={() => setProbedLocation(null)}
+        onClearProbe={handleClearProbe}
         zenMode={zenMode}
         onToggleZenMode={() => setZenMode((z) => !z)}
         engine={engine}
